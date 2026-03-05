@@ -1,0 +1,73 @@
+name: Upstream Sync Check
+
+on:
+  schedule:
+    # Runs daily at 8 AM PST (16:00 UTC)
+    - cron: '0 16 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/sipeed/picoclaw.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Check for new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "status=behind" >> $GITHUB_OUTPUT
+            echo "::notice::Fork is $BEHIND commits behind upstream"
+            # Get summary of changes
+            echo "## Upstream Changes" > /tmp/pr_body.md
+            echo "" >> /tmp/pr_body.md
+            echo "Fork is **$BEHIND commits** behind sipeed/picoclaw:main" >> /tmp/pr_body.md
+            echo "" >> /tmp/pr_body.md
+            echo "### Recent commits (last 20):" >> /tmp/pr_body.md
+            echo '```' >> /tmp/pr_body.md
+            git log --oneline HEAD..upstream/main | head -20 >> /tmp/pr_body.md
+            echo '```' >> /tmp/pr_body.md
+            echo "" >> /tmp/pr_body.md
+            echo "### Changed files:" >> /tmp/pr_body.md
+            echo '```' >> /tmp/pr_body.md
+            git diff --stat HEAD..upstream/main | tail -20 >> /tmp/pr_body.md
+            echo '```' >> /tmp/pr_body.md
+            echo "" >> /tmp/pr_body.md
+            echo "> **Review carefully before merging.** Do not auto-merge." >> /tmp/pr_body.md
+          else
+            echo "status=current" >> $GITHUB_OUTPUT
+            echo "::notice::Fork is up to date with upstream"
+          fi
+
+      - name: Create sync branch
+        if: steps.check.outputs.status == 'behind'
+        run: |
+          git checkout -b upstream-sync-$(date +%Y%m%d)
+          git merge upstream/main --no-edit
+          git push origin upstream-sync-$(date +%Y%m%d)
+
+      - name: Create Pull Request
+        if: steps.check.outputs.status == 'behind'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: upstream-sync-${{ github.run_id }}
+          title: "[Upstream Sync] ${{ steps.check.outputs.behind }} new commits from sipeed/picoclaw"
+          body-path: /tmp/pr_body.md
+          labels: upstream-sync
+          draft: true
